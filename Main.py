@@ -64,8 +64,8 @@ import hashlib
 import requests
 import paramiko
 import winrm
-import yara  # Ensure yara-python is installed
 import pefile
+import platform
 
 # ---------------------------
 # CONFIGURATION VARIABLES
@@ -73,6 +73,12 @@ import pefile
 DEEPSEEK_PATH = "C:\\Program Files\\DeepSeek\\deepseek.exe"  # Update if needed
 REPORT_DIR = "forensics_reports"
 DEEPSEEK_API = "http://localhost:5000/query"
+
+yara = None
+try:
+    import yara
+except ImportError:
+    print("[INFO] YARA is not installed. YARA scanning will be skipped unless running in WSL.")
 
 # SIEM configuration dictionary; user will be prompted to fill these in.
 SIEM_TOOLS = {
