@@ -99,7 +99,7 @@ YARA_RULE_PATH = "rules/malware_rules.yar"  # Ensure this file exists
 USE_WSL_FOR_YARA = True  # Set to True if using WSL on Windows
 
 # VirusTotal API Key
-VIRUSTOTAL_API_KEY = "f6a0141a94b1afa96c4d0fbb501d759cf89f86d9f201974c930d32dc7e4fec5f"  # Replace with your key
+VIRUSTOTAL_API_KEY = ""  # Replace with your key
 
 # ---------------------------
 # UTILITY FUNCTIONS
