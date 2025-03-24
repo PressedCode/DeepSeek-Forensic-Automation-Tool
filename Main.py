@@ -486,7 +486,7 @@ def call_function(function_name, *args):
 def ai_driven_analysis(file_path, analysis_level):
     """Perform AI-driven dynamic analysis."""
     analysis_results = []
-    prompt = f"Analyze the file at {file_path} at {analysis_level} level. You have access to the following functions: {list(FUNCTION_MAP.keys())}. Provide the first function to call or command to execute."
+    prompt = f"Analyze the file at {file_path} at {analysis_level} level. You have access to the following functions: {list(FUNCTION_MAP.keys())}. Provide the first function to call (use 'call: function_name') or command to execute (use 'execute: command')."
     
     while True:
         # Get the AI's response
@@ -507,23 +507,27 @@ def ai_driven_analysis(file_path, analysis_level):
         
         # Check if the AI wants to execute a command
         elif "execute:" in ai_response.lower():
-            command = ai_response.split("execute:")[1].strip()
-            
-            # Prevent deletion of the original sample
-            if "del" in command.lower() or "rm" in command.lower():
-                print("[WARNING] Deletion of the original sample is not allowed.")
-                continue
-            
-            # Check if the command requires admin permissions
-            if "admin" in command.lower() or "sudo" in command.lower():
-                user_input = input(f"The command '{command}' requires admin permissions. Do you want to proceed? (yes/no): ").strip().lower()
-                if user_input != "yes":
-                    print("[INFO] Command execution canceled by user.")
+            command_parts = ai_response.split("execute:")
+            if len(command_parts) > 1:
+                command = command_parts[1].strip()
+                
+                # Prevent deletion of the original sample
+                if "del" in command.lower() or "rm" in command.lower():
+                    print("[WARNING] Deletion of the original sample is not allowed.")
                     continue
-            
-            print(f"[INFO] Executing: {command}")
-            result = execute_command(command)
-            analysis_results.append(result)
+                
+                # Check if the command requires admin permissions
+                if "admin" in command.lower() or "sudo" in command.lower():
+                    user_input = input(f"The command '{command}' requires admin permissions. Do you want to proceed? (yes/no): ").strip().lower()
+                    if user_input != "yes":
+                        print("[INFO] Command execution canceled by user.")
+                        continue
+                
+                print(f"[INFO] Executing: {command}")
+                result = execute_command(command)
+                analysis_results.append(result)
+            else:
+                print("[ERROR] Invalid command format in AI response.")
         
         # Capture a screenshot only if there are results
         if analysis_results:
@@ -546,7 +550,6 @@ def ai_driven_analysis(file_path, analysis_level):
     report_file = generate_pdf_report(file_path, json_file)
     
     return report_file
-
 FUNCTION_MAP = {
     "calculate_file_hash": calculate_file_hash,
     "yara_scan": yara_scan,
