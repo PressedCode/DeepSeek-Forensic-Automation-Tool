@@ -3,90 +3,59 @@
 Forensic Automation Suite
 ==========================
 
-This tool provides multiple forensic analysis capabilities:
-  1. Forensic Image Analysis (Memory dumps, Disk images)
-  2. Static Malware Analysis (File hashing, YARA scanning, string extraction, metadata analysis,
-     VirusTotal check, and packed detection)
-  3. Interactive DeepSeek AI Chat (Send queries, upload files)
-  
-Optional/Advanced Modules (Stubs available for future integration):
-  - Real-Time Monitoring
-  - Behavioral Analysis of Processes
-  - Enhanced Reporting (PDF/CSV/HTML)
+An advanced cybersecurity tool for digital forensics, malware analysis, and SIEM integration.
+
+Features:
+  - SQLite database for persistence
+  - Background analysis mode
+  - AI-driven forensic investigations
+  - Full forensic image and malware analysis
+  - Windows PowerShell & WSL connectivity
+  - SIEM integration (Wazuh, ELK, Splunk, HELK)
+  - Advanced report generation (PDF/CSV/HTML)
   - Interactive CLI for dynamic analysis control
-  - Automated Incident Response Playbooks
-  - Network Traffic Analysis (e.g., Wireshark/Zeek integration)
-  - Automated Malware Classification (ML-based)
-  - Support for Additional Disk Image Formats (VHD, VMDK, etc.)
-  - Timeline Correlation with External Logs
-  - Machine Learning Anomaly Detection
 
-SIEM integrations available (Wazuh, ELK, Splunk, HELK) are activated by entering their network locations.
-
-Dependencies:
+Requirements:
   - Python 3.x
-  - paramiko, pywinrm, requests (install via pip)
-  - pefile, yara-python (install via pip)
-  - Volatility, SleuthKit, Bulk Extractor, etc. for forensic image analysis (install separately)
-  - For VirusTotal checks, obtain an API key from https://www.virustotal.com
-  - On Windows: optionally use WSL with Ubuntu to run YARA (if USE_WSL_FOR_YARA is True)
-
-Setup:
-  1. Install required Python packages:
-       pip install paramiko pywinrm requests pefile yara-python
-  2. Install external tools:
-       - Volatility (for memory analysis)
-       - SleuthKit (for disk image analysis)
-       - YARA (if not using the native Windows version, install in WSL via "sudo apt install yara")
-  3. Configure your VirusTotal API key below.
-  4. Adjust paths for DeepSeek AI (DEEPSEEK_PATH) and YARA rules (YARA_RULE_PATH) as needed.
-  5. Configure SIEM endpoints when prompted at runtime.
+  - Dependencies: paramiko, pywinrm, requests, pefile, yara-python, fpdf, pillow
 
 Usage:
   Run the script and follow the menu prompts:
       python forensic_suite.py
-
-The menu will allow you to choose:
-  1. Forensic Image Analysis
-  2. Static Malware Analysis
-  3. Interactive DeepSeek AI Chat
-  4. (Optional) Launch advanced modules (stubs)
-  5. Exit
-
 """
 
 import os
-import json
+import sqlite3
 import time
 import threading
 import subprocess
+import json
 import hashlib
-import requests
 import paramiko
 import winrm
 import pefile
 import platform
 import psutil
+import re
+import base64
+import requests  # Add this line
+from datetime import datetime
 from scapy.all import sniff
 from fpdf import FPDF
-import csv
 from PIL import ImageGrab
-import base64
-import re
+import csv
 
 # ---------------------------
 # CONFIGURATION VARIABLES
 # ---------------------------
-OLLAMA_API = "http://localhost:11434/api/generate"  # Ollama API endpoint
+DATABASE_FILE = "forensic_ai.db"
 REPORT_DIR = "forensics_reports"
+OLLAMA_API = "http://localhost:11434/api/generate"
+BACKGROUND_ANALYSIS_INTERVAL = 3600  # Run every hour
+YARA_RULE_PATH = "rules/malware_rules.yar"
+USE_WSL_FOR_YARA = True  # Set to True if using WSL on Windows
 
-yara = None
-try:
-    import yara
-except ImportError:
-    print("[INFO] YARA is not installed. YARA scanning will be skipped unless running in WSL.")
-
-# SIEM configuration dictionary; user will be prompted to fill these in.
+# SIEM configuration
 SIEM_TOOLS = {
     "wazuh": None,
     "elk": None,
@@ -94,17 +63,88 @@ SIEM_TOOLS = {
     "helk": None
 }
 
-# YARA configuration
-YARA_RULE_PATH = "rules/malware_rules.yar"  # Ensure this file exists
-USE_WSL_FOR_YARA = True  # Set to True if using WSL on Windows
+# Initialize YARA
+yara = None
+try:
+    import yara
+except ImportError:
+    print("[INFO] YARA is not installed. YARA scanning will be skipped unless running in WSL.")
 
-# VirusTotal API Key
-VIRUSTOTAL_API_KEY = "f6a0141a94b1afa96c4d0fbb501d759cf89f86d9f201974c930d32dc7e4fec5f"  # Replace with your key
+# ---------------------------
+# DATABASE SETUP
+# ---------------------------
+def initialize_database():
+    """Initialize the SQLite database for storing forensic cases and AI interactions."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS forensic_cases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_path TEXT,
+            analysis_results TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ai_interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT,
+            response TEXT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def save_forensic_case(file_path, analysis_results):
+    """Save forensic analysis results to the database."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO forensic_cases (file_path, analysis_results) VALUES (?, ?)",
+                   (file_path, json.dumps(analysis_results)))
+    conn.commit()
+    conn.close()
+
+def save_ai_interaction(query, response):
+    """Save AI interaction to the database."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO ai_interactions (query, response) VALUES (?, ?)",
+                   (query, response))
+    conn.commit()
+    conn.close()
+
+def display_recent_cases():
+    """Display recent forensic cases from the database."""
+    conn = sqlite3.connect(DATABASE_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM forensic_cases ORDER BY timestamp DESC LIMIT 5")
+    cases = cursor.fetchall()
+    conn.close()
+    
+    for case in cases:
+        case_id, file_path, analysis_results, timestamp = case
+        results = json.loads(analysis_results)
+
+        print(f"\n=== Case {case_id} ===")
+        print(f"File: {file_path}")
+        print(f"Analyzed: {timestamp}")
+        print(f"SHA256: {results.get('hash', 'N/A')}")
+        print(f"AI Summary: {results.get('ai_analysis', 'N/A')[:300]}...")
+        print(f"YARA Matches: {results.get('yara_matches', [])}")
+        print(f"PE Sections: {results.get('pe_metadata', {}).get('sections', [])}")
+        
+        vt_results = results.get("virus_total", {})
+        if isinstance(vt_results, dict) and "malicious" in vt_results:
+            print(f"VirusTotal: {vt_results['malicious']} detections")
+            print(f"Threats: {', '.join(vt_results.get('threat_labels', []))}")
+            print(f"VT Link: {vt_results.get('link', 'N/A')}")
+        else:
+            print("VirusTotal: Not available")
 
 # ---------------------------
 # UTILITY FUNCTIONS
 # ---------------------------
-
 def ask_for_siem_network_locations():
     """Prompt user for SIEM network locations."""
     print("[INFO] Enter the network locations for the following SIEM tools (leave blank to skip):")
@@ -131,41 +171,20 @@ def send_to_siem(siem, data):
 
 def convert_windows_path_to_wsl(windows_path):
     """Convert a Windows file path to a WSL-compatible path."""
-    # Remove surrounding quotes if present
     windows_path = windows_path.strip('"')
-    
-    # Replace backslashes with forward slashes
     windows_path = windows_path.replace("\\", "/")
     
-    # Check if the path is a Windows drive path (e.g., "C:/" or "F:/")
     if ":/" in windows_path:
-        drive_letter = windows_path[0].lower()  # Extract the drive letter
+        drive_letter = windows_path[0].lower()
         wsl_path = windows_path.replace(f"{drive_letter.upper()}:/", f"/mnt/{drive_letter}/")
         return wsl_path
     else:
-        # If it's not a drive path, assume it's already in WSL format
         return windows_path
 
 def sanitize_text(text):
-    """Sanitize text by replacing unsupported Unicode characters and removing the /think section."""
-    # Remove the /think section using a regular expression
+    """Sanitize text by replacing unsupported Unicode characters."""
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    
-    # Sanitize text by replacing unsupported Unicode characters
     return text.encode("latin-1", errors="replace").decode("latin-1")
-
-def save_analysis_to_json(file_path, analysis_results):
-    """Save analysis results to a JSON file."""
-    json_file = f"{REPORT_DIR}/analysis_{os.path.basename(file_path)}.json"
-    with open(json_file, "w") as f:
-        json.dump(analysis_results, f, indent=4)
-    print(f"[INFO] Analysis results saved to {json_file}")
-    return json_file
-
-def read_analysis_from_json(json_file):
-    """Read analysis results from a JSON file."""
-    with open(json_file, "r") as f:
-        return json.load(f)
 
 # ---------------------------
 # FORENSIC IMAGE ANALYSIS
@@ -175,14 +194,12 @@ def analyze_memory_dump(file_path):
     print(f"[INFO] Running Volatility on {file_path} via WSL...")
     results = {}
     
-    # Convert the Windows file path to a WSL-compatible path
     wsl_file_path = convert_windows_path_to_wsl(file_path)
     
-    # Determine the profile based on the file type
     if file_path.endswith(".vmem"):
-        profile = "Win7SP1x64"  # Example profile for VMware memory dump
+        profile = "Win7SP1x64"
     else:
-        profile = "Win10x64"  # Default profile for other memory dumps
+        profile = "Win10x64"
     
     commands = [
         f"wsl volatility -f '{wsl_file_path}' --profile={profile} imageinfo",
@@ -206,26 +223,22 @@ def analyze_disk_image(file_path):
     print(f"[INFO] Running SleuthKit on {file_path} via WSL...")
     results = {}
     
-    # Convert the Windows file path to a WSL-compatible path
     wsl_file_path = convert_windows_path_to_wsl(file_path)
     
-    # Determine the file type and adjust commands accordingly
     if file_path.endswith(".vmdk"):
-        # Use qemu-img to convert VMDK to raw format
         raw_file_path = f"{wsl_file_path}.raw"
         commands = [
-            f"wsl qemu-img convert -O raw '{wsl_file_path}' '{raw_file_path}'",  # Convert VMDK to raw
-            f"wsl file '{raw_file_path}'",  # Verify the raw file type
+            f"wsl qemu-img convert -O raw '{wsl_file_path}' '{raw_file_path}'",
+            f"wsl file '{raw_file_path}'",
             f"wsl fls -r '{raw_file_path}'",
-            f"wsl icat '{raw_file_path}' 512",  # Example: extract file content
+            f"wsl icat '{raw_file_path}' 512",
             f"wsl tsk_recover '{raw_file_path}' {REPORT_DIR}/recovered_files/",
-            f"wsl rm '{raw_file_path}'",  # Clean up the raw file after analysis
+            f"wsl rm '{raw_file_path}'",
         ]
     else:
-        # Default commands for other disk image formats
         commands = [
             f"wsl fls -r '{wsl_file_path}'",
-            f"wsl icat '{wsl_file_path}' 512",  # Example: extract file content
+            f"wsl icat '{wsl_file_path}' 512",
             f"wsl tsk_recover '{wsl_file_path}' {REPORT_DIR}/recovered_files/",
         ]
     
@@ -249,7 +262,6 @@ def forensic_image_analysis():
         path = path.strip('"')
         if path.lower() == "done":
             break
-        # Replace forward slashes with backslashes for Windows compatibility
         path = path.replace('/', '\\')
         if os.path.exists(path):
             file_paths.append(path)
@@ -266,15 +278,18 @@ def forensic_image_analysis():
             else:
                 print(f"[ERROR] Unsupported file type: {file_path}")
                 return
+            
             print(f"[INFO] Sending analysis report for {file_path} to Ollama...")
             ollama_response = send_file_to_ollama(report)
             print(f"Ollama Response: {ollama_response}")
-            # Export to SIEMs
+            
             for siem in SIEM_TOOLS.keys():
                 send_to_siem(siem, ollama_response)
+        
         t = threading.Thread(target=analyze_file, args=(path,))
         threads.append(t)
         t.start()
+    
     for t in threads:
         t.join()
 
@@ -333,10 +348,24 @@ def virus_total_check(file_hash):
     url = f"https://www.virustotal.com/api/v3/files/{file_hash}"
     headers = {"x-apikey": VIRUSTOTAL_API_KEY}
     response = requests.get(url, headers=headers)
+    
     if response.status_code == 200:
-        return response.json()
+        vt_data = response.json()
+        attributes = vt_data.get("data", {}).get("attributes", {})
+        
+        detection_stats = attributes.get("last_analysis_stats", {})
+        threat_classifications = attributes.get("popular_threat_classification", {}).get("popular_threat_name", [])
+        threat_labels = [t["value"] for t in threat_classifications]
+
+        return {
+            "malicious": detection_stats.get("malicious", 0),
+            "undetected": detection_stats.get("undetected", 0),
+            "first_seen": attributes.get("first_submission_date", "Unknown"),
+            "threat_labels": threat_labels,
+            "link": vt_data["data"]["links"]["self"]
+        }
     else:
-        return f"[ERROR] VirusTotal check failed: {response.text}"
+        return {"error": f"VirusTotal check failed: {response.text}"}
 
 def detect_packed_exe(file_path):
     """Detect if a PE file is packed."""
@@ -346,6 +375,189 @@ def detect_packed_exe(file_path):
         return packed
     except Exception as e:
         return f"[ERROR] Packed detection failed: {e}"
+
+# ---------------------------
+# AI INTERACTION
+# ---------------------------
+def send_to_ollama(prompt):
+    """Send a prompt to Ollama and return its response."""
+    try:
+        data = {
+            "model": "deepseek-r1",
+            "prompt": prompt,
+            "stream": False
+        }
+        response = requests.post(OLLAMA_API, json=data)
+        if response.status_code == 200:
+            full_response = response.json().get("response", "No response")
+            extracted_summary = full_response.split("To analyze the unknown1.exe file")[1] if "To analyze the unknown1.exe file" in full_response else full_response
+            save_ai_interaction(prompt, extracted_summary)
+            return extracted_summary.strip()
+        else:
+            return f"[ERROR] Ollama API request failed: {response.text}"
+    except Exception as e:
+        return f"[ERROR] Ollama communication failed: {e}"
+
+def send_file_to_ollama(filepath):
+    """Upload a file to Ollama for analysis."""
+    try:
+        with open(filepath, "rb") as f:
+            file_content = f.read()
+        file_content_base64 = base64.b64encode(file_content).decode("utf-8")
+        prompt = f"Analyze the following file content (Base64 encoded):\n{file_content_base64}"
+        return send_to_ollama(prompt)
+    except Exception as e:
+        return f"[ERROR] File upload failed: {e}"
+
+# ---------------------------
+# DYNAMIC ANALYSIS
+# ---------------------------
+def capture_screenshot(task_name):
+    """Capture a screenshot and save it with a task-specific name."""
+    screenshot_path = f"{REPORT_DIR}/{task_name}_{int(time.time())}.png"
+    ImageGrab.grab().save(screenshot_path)
+    return screenshot_path
+
+def execute_command(command):
+    """Execute a command in the terminal and return its output."""
+    try:
+        if "del" in command.lower() or "rm" in command.lower():
+            return {"command": command, "output": "", "error": "[ERROR] Deletion of the original sample is not allowed."}
+        
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        return {
+            "command": command,
+            "output": result.stdout,
+            "error": result.stderr
+        }
+    except Exception as e:
+        return {"command": command, "output": "", "error": f"[ERROR] Command execution failed: {e}"}
+
+def call_function(function_name, *args):
+    """Call a function by name and return its result."""
+    if function_name in FUNCTION_MAP:
+        return FUNCTION_MAP[function_name](*args)
+    else:
+        return f"[ERROR] Function '{function_name}' not found."
+
+def ai_driven_analysis(file_path, analysis_level):
+    """Perform AI-driven dynamic analysis."""
+    analysis_results = []
+    prompt = f"Analyze the file at {file_path} at {analysis_level} level. You have access to the following functions: {list(FUNCTION_MAP.keys())}. Provide the first function to call (use 'call: function_name(arg1, arg2)') or command to execute (use 'execute: command')."
+    
+    while True:
+        ai_response = send_to_ollama(prompt)
+        print(f"[AI] {ai_response}")
+        
+        result = None
+        
+        if "call:" in ai_response.lower():
+            try:
+                function_call = ai_response.split("call:")[1].strip()
+                if "(" in function_call and ")" in function_call:
+                    function_name = function_call.split("(")[0].strip()
+                    args_part = function_call.split("(")[1].split(")")[0].strip()
+                    args = [arg.strip() for arg in args_part.split(",")] if args_part else []
+                    
+                    print(f"[INFO] Calling function: {function_name} with args: {args}")
+                    result = call_function(function_name, *args)
+                    analysis_results.append({"function": function_name, "output": result})
+                else:
+                    print("[ERROR] Invalid function call format. Expected 'call: function_name(arg1, arg2)'.")
+            except Exception as e:
+                print(f"[ERROR] Failed to parse function call: {e}")
+        
+        elif "execute:" in ai_response.lower():
+            command_parts = ai_response.split("execute:")
+            if len(command_parts) > 1:
+                command = command_parts[1].strip()
+                
+                if "del" in command.lower() or "rm" in command.lower():
+                    print("[WARNING] Deletion of the original sample is not allowed.")
+                    continue
+                
+                if "admin" in command.lower() or "sudo" in command.lower():
+                    user_input = input(f"The command '{command}' requires admin permissions. Do you want to proceed? (yes/no): ").strip().lower()
+                    if user_input != "yes":
+                        print("[INFO] Command execution canceled by user.")
+                        continue
+                
+                print(f"[INFO] Executing: {command}")
+                result = execute_command(command)
+                analysis_results.append(result)
+            else:
+                print("[ERROR] Invalid command format in AI response.")
+        
+        if analysis_results:
+            screenshot_path = capture_screenshot("analysis_step")
+            analysis_results[-1]["screenshot"] = screenshot_path
+        
+        if result is not None:
+            prompt = f"Last action: {ai_response}\nOutput: {result}\nWhat is the next function to call or command to execute? (Type 'done' to finish)"
+        else:
+            prompt = f"Last action: {ai_response}\nWhat is the next function to call or command to execute? (Type 'done' to finish)"
+        
+        if "done" in prompt.lower():
+            break
+    
+    json_file = save_analysis_to_json(file_path, analysis_results)
+    report_file = generate_pdf_report(file_path, json_file)
+    return report_file
+
+def save_analysis_to_json(file_path, analysis_results):
+    """Save analysis results to a JSON file."""
+    json_file = f"{REPORT_DIR}/analysis_{os.path.basename(file_path)}.json"
+    with open(json_file, "w") as f:
+        json.dump(analysis_results, f, indent=4)
+    print(f"[INFO] Analysis results saved to {json_file}")
+    return json_file
+
+def read_analysis_from_json(json_file):
+    """Read analysis results from a JSON file."""
+    with open(json_file, "r") as f:
+        return json.load(f)
+
+def generate_pdf_report(file_path, json_file):
+    """Generate a PDF report with AI-generated human-readable analysis."""
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="Dynamic Malware Analysis Report", ln=True, align="C")
+    
+    analysis_results = read_analysis_from_json(json_file)
+    
+    analysis_data = "Analysis Results:\n"
+    for result in analysis_results:
+        if "function" in result:
+            analysis_data += f"Function: {result['function']}\n"
+        if "command" in result:
+            analysis_data += f"Command: {result['command']}\n"
+        if "output" in result:
+            analysis_data += f"Output: {result['output']}\n"
+        if "error" in result:
+            analysis_data += f"Error: {result['error']}\n"
+        analysis_data += "\n"
+    
+    ai_prompt = (
+        f"Generate a detailed, human-readable malware analysis report based on the following data:\n"
+        f"File: {file_path}\n"
+        f"Analysis Results:\n{analysis_data}\n"
+        "Include a summary of findings, potential risks, and recommendations."
+    )
+    ai_response = send_to_ollama(ai_prompt)
+    sanitized_text = sanitize_text(ai_response)
+    pdf.multi_cell(0, 10, txt=sanitized_text)
+    
+    for result in analysis_results:
+        if "screenshot" in result:
+            pdf.add_page()
+            pdf.image(result["screenshot"], x=10, y=pdf.get_y(), w=180)
+            pdf.ln(100)
+    
+    report_file = f"{REPORT_DIR}/dynamic_analysis_{os.path.basename(file_path)}.pdf"
+    pdf.output(report_file)
+    print(f"[INFO] PDF report saved to {report_file}")
+    return report_file
 
 def prompt_dynamic_analysis():
     """Prompt user for a file and analysis level, then perform AI-driven dynamic analysis."""
@@ -363,219 +575,13 @@ def prompt_dynamic_analysis():
         print("[ERROR] Invalid analysis level.")
         return
 
-    # Perform AI-driven dynamic analysis
     report_file = ai_driven_analysis(file_path, analysis_level)
-
-    # Send the report to Ollama for final analysis
     ollama_response = send_to_ollama(f"Analyze the final report: {report_file}")
     print(f"Ollama Response: {ollama_response}")
 
 # ---------------------------
-# INTERACTIVE OLLAMA AI CHAT
+# ADVANCED MODULES
 # ---------------------------
-def send_file_to_ollama(filepath):
-    """Upload a file to Ollama for analysis."""
-    try:
-        with open(filepath, "rb") as f:
-            file_content = f.read()
-        # Encode the binary content in Base64
-        file_content_base64 = base64.b64encode(file_content).decode("utf-8")
-        prompt = f"Analyze the following file content (Base64 encoded):\n{file_content_base64}"
-        return send_to_ollama(prompt)
-    except Exception as e:
-        return f"[ERROR] File upload failed: {e}"
-
-def capture_screenshot(task_name):
-    """Capture a screenshot and save it with a task-specific name."""
-    screenshot_path = f"{REPORT_DIR}/{task_name}_{int(time.time())}.png"
-    ImageGrab.grab().save(screenshot_path)
-    return screenshot_path
-
-def execute_command(command):
-    """Execute a command in the terminal and return its output."""
-    try:
-        # Prevent deletion of the original sample
-        if "del" in command.lower() or "rm" in command.lower():
-            return {"command": command, "output": "", "error": "[ERROR] Deletion of the original sample is not allowed."}
-        
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
-        return {
-            "command": command,
-            "output": result.stdout,
-            "error": result.stderr
-        }
-    except Exception as e:
-        return {"command": command, "output": "", "error": f"[ERROR] Command execution failed: {e}"}
-
-def send_to_ollama(prompt):
-    """Send a prompt to Ollama and return its response."""
-    try:
-        data = {
-            "model": "deepseek-r1",  # Replace with your preferred model
-            "prompt": prompt,
-            "stream": False
-        }
-        response = requests.post(OLLAMA_API, json=data)
-        if response.status_code == 200:
-            return response.json().get("response", "No response")
-        else:
-            return f"[ERROR] Ollama API request failed: {response.text}"
-    except Exception as e:
-        return f"[ERROR] Ollama communication failed: {e}"
-
-def generate_pdf_report(file_path, json_file):
-    """Generate a PDF report with AI-generated human-readable analysis."""
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", size=12)
-    
-    # Title
-    pdf.cell(200, 10, txt="Dynamic Malware Analysis Report", ln=True, align="C")
-    
-    # Read analysis data from the JSON file
-    analysis_results = read_analysis_from_json(json_file)
-    
-    # Prepare the analysis data for the AI
-    analysis_data = "Analysis Results:\n"
-    for result in analysis_results:
-        if "function" in result:
-            analysis_data += f"Function: {result['function']}\n"
-        if "command" in result:
-            analysis_data += f"Command: {result['command']}\n"
-        if "output" in result:
-            analysis_data += f"Output: {result['output']}\n"
-        if "error" in result:
-            analysis_data += f"Error: {result['error']}\n"
-        analysis_data += "\n"
-    
-    # Ask the AI to generate a human-readable analysis report
-    ai_prompt = (
-        f"Generate a detailed, human-readable malware analysis report based on the following data:\n"
-        f"File: {file_path}\n"
-        f"Analysis Results:\n{analysis_data}\n"
-        "Include a summary of findings, potential risks, and recommendations."
-    )
-    ai_response = send_to_ollama(ai_prompt)
-    
-    # Sanitize the AI-generated text
-    sanitized_text = sanitize_text(ai_response)
-    
-    # Write the sanitized AI-generated analysis to the PDF
-    pdf.multi_cell(0, 10, txt=sanitized_text)
-    
-    # Add screenshots if available
-    for result in analysis_results:
-        if "screenshot" in result:
-            pdf.add_page()
-            pdf.image(result["screenshot"], x=10, y=pdf.get_y(), w=180)
-            pdf.ln(100)  # Adjust spacing for the next section
-    
-    # Save the PDF report
-    report_file = f"{REPORT_DIR}/dynamic_analysis_{os.path.basename(file_path)}.pdf"
-    pdf.output(report_file)
-    print(f"[INFO] PDF report saved to {report_file}")
-    return report_file
-
-def call_function(function_name, *args):
-    """Call a function by name and return its result."""
-    if function_name in FUNCTION_MAP:
-        return FUNCTION_MAP[function_name](*args)
-    else:
-        return f"[ERROR] Function '{function_name}' not found."
-
-def ai_driven_analysis(file_path, analysis_level):
-    """Perform AI-driven dynamic analysis."""
-    analysis_results = []
-    prompt = f"Analyze the file at {file_path} at {analysis_level} level. You have access to the following functions: {list(FUNCTION_MAP.keys())}. Provide the first function to call (use 'call: function_name(arg1, arg2)') or command to execute (use 'execute: command')."
-    
-    while True:
-        # Get the AI's response
-        ai_response = send_to_ollama(prompt)
-        print(f"[AI] {ai_response}")
-        
-        # Initialize result to avoid UnboundLocalError
-        result = None
-        
-        # Check if the AI wants to call a function
-        if "call:" in ai_response.lower():
-            try:
-                # Extract the function call part
-                function_call = ai_response.split("call:")[1].strip()
-                
-                # Check if the function call contains parentheses
-                if "(" in function_call and ")" in function_call:
-                    function_name = function_call.split("(")[0].strip()
-                    args_part = function_call.split("(")[1].split(")")[0].strip()
-                    args = [arg.strip() for arg in args_part.split(",")] if args_part else []
-                    
-                    print(f"[INFO] Calling function: {function_name} with args: {args}")
-                    result = call_function(function_name, *args)
-                    analysis_results.append({"function": function_name, "output": result})
-                else:
-                    print("[ERROR] Invalid function call format. Expected 'call: function_name(arg1, arg2)'.")
-            except Exception as e:
-                print(f"[ERROR] Failed to parse function call: {e}")
-        
-        # Check if the AI wants to execute a command
-        elif "execute:" in ai_response.lower():
-            command_parts = ai_response.split("execute:")
-            if len(command_parts) > 1:
-                command = command_parts[1].strip()
-                
-                # Prevent deletion of the original sample
-                if "del" in command.lower() or "rm" in command.lower():
-                    print("[WARNING] Deletion of the original sample is not allowed.")
-                    continue
-                
-                # Check if the command requires admin permissions
-                if "admin" in command.lower() or "sudo" in command.lower():
-                    user_input = input(f"The command '{command}' requires admin permissions. Do you want to proceed? (yes/no): ").strip().lower()
-                    if user_input != "yes":
-                        print("[INFO] Command execution canceled by user.")
-                        continue
-                
-                print(f"[INFO] Executing: {command}")
-                result = execute_command(command)
-                analysis_results.append(result)
-            else:
-                print("[ERROR] Invalid command format in AI response.")
-        
-        # Capture a screenshot only if there are results
-        if analysis_results:
-            screenshot_path = capture_screenshot("analysis_step")
-            analysis_results[-1]["screenshot"] = screenshot_path
-        
-        # Ask the AI if it needs more information
-        if result is not None:
-            prompt = f"Last action: {ai_response}\nOutput: {result}\nWhat is the next function to call or command to execute? (Type 'done' to finish)"
-        else:
-            prompt = f"Last action: {ai_response}\nWhat is the next function to call or command to execute? (Type 'done' to finish)"
-        
-        if "done" in prompt.lower():
-            break
-    
-    # Save analysis results to a JSON file
-    json_file = save_analysis_to_json(file_path, analysis_results)
-    
-    # Generate the PDF report with AI-generated analysis
-    report_file = generate_pdf_report(file_path, json_file)
-    
-    return report_file
-FUNCTION_MAP = {
-    "calculate_file_hash": calculate_file_hash,
-    "yara_scan": yara_scan,
-    "extract_strings": extract_strings,
-    "analyze_file_metadata": analyze_file_metadata,
-    "virus_total_check": virus_total_check,
-    "detect_packed_exe": detect_packed_exe,
-    "capture_screenshot": capture_screenshot,
-    "execute_command": execute_command,
-}
-
-# ---------------------------
-# ADVANCED MODULES (IMPLEMENTED)
-# ---------------------------
-
 def real_time_monitoring():
     """Monitor a directory for new files and analyze them."""
     print("[INFO] Starting real-time monitoring...")
@@ -589,14 +595,14 @@ def real_time_monitoring():
 
     try:
         while True:
-            time.sleep(5)  # Check every 5 seconds
+            time.sleep(5)
             current_files = set(os.listdir(monitor_dir))
             new_files = current_files - known_files
             if new_files:
                 for file in new_files:
                     file_path = os.path.join(monitor_dir, file)
                     print(f"[INFO] New file detected: {file_path}")
-                    static_malware_analysis(file_path)  # Analyze the new file
+                    analyze_file(file_path)
                 known_files = current_files
     except KeyboardInterrupt:
         print("[INFO] Stopping real-time monitoring.")
@@ -610,7 +616,7 @@ def behavioral_analysis():
                 print(f"Process: {proc.info['name']} (PID: {proc.info['pid']})")
                 print(f"  CPU Usage: {proc.info['cpu_percent']}%")
                 print(f"  Memory Usage: {proc.info['memory_info'].rss / 1024 / 1024:.2f} MB")
-            time.sleep(10)  # Check every 10 seconds
+            time.sleep(10)
     except KeyboardInterrupt:
         print("[INFO] Stopping behavioral analysis.")
 
@@ -622,7 +628,6 @@ def enhanced_reporting():
         "analysis_results": "example_results"
     }
 
-    # Generate PDF report
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", size=12)
@@ -631,14 +636,12 @@ def enhanced_reporting():
     pdf.output(f"{REPORT_DIR}/report.pdf")
     print(f"[INFO] PDF report saved to {REPORT_DIR}/report.pdf")
 
-    # Generate CSV report
     with open(f"{REPORT_DIR}/report.csv", "w") as csv_file:
         writer = csv.writer(csv_file)
         for key, value in report_data.items():
             writer.writerow([key, value])
     print(f"[INFO] CSV report saved to {REPORT_DIR}/report.csv")
 
-    # Generate HTML report
     with open(f"{REPORT_DIR}/report.html", "w") as html_file:
         html_file.write("<html><body><h1>Forensic Analysis Report</h1>")
         html_file.write(f"<pre>{json.dumps(report_data, indent=4)}</pre>")
@@ -666,7 +669,7 @@ def network_traffic_analysis():
         print(f"Packet: {packet.summary()}")
 
     try:
-        sniff(prn=packet_callback, count=10)  # Capture 10 packets
+        sniff(prn=packet_callback, count=10)
     except Exception as e:
         print(f"[ERROR] Network traffic analysis failed: {e}")
 
@@ -678,7 +681,6 @@ def automated_malware_classification():
         print("[ERROR] File not found.")
         return
 
-    # Simple heuristic: Check if the file contains suspicious strings
     suspicious_strings = ["malware", "virus", "exploit"]
     with open(file_path, "r", errors="ignore") as f:
         content = f.read()
@@ -704,7 +706,7 @@ def timeline_correlation():
 def anomaly_detection():
     """Detect anomalies in a dataset using simple statistics."""
     print("[INFO] Starting anomaly detection...")
-    dataset = [10, 12, 11, 15, 10, 100, 11, 12]  # Example dataset
+    dataset = [10, 12, 11, 15, 10, 100, 11, 12]
     mean = sum(dataset) / len(dataset)
     std_dev = (sum((x - mean) ** 2 for x in dataset) / len(dataset)) ** 0.5
 
@@ -712,6 +714,17 @@ def anomaly_detection():
     for value in dataset:
         if abs(value - mean) > 2 * std_dev:
             print(f"[WARNING] Anomaly detected: {value}")
+
+def background_analysis():
+    """Run scheduled background analysis tasks."""
+    while True:
+        print("[INFO] Running scheduled background analysis...")
+        time.sleep(BACKGROUND_ANALYSIS_INTERVAL)
+
+def start_background_thread():
+    """Start the background analysis thread."""
+    thread = threading.Thread(target=background_analysis, daemon=True)
+    thread.start()
 
 def advanced_modules_menu():
     print("\n--- Advanced Modules ---")
@@ -723,7 +736,8 @@ def advanced_modules_menu():
     print("6. Automated Malware Classification")
     print("7. Timeline Correlation with External Logs")
     print("8. Machine Learning Anomaly Detection")
-    print("9. Return to Main Menu")
+    print("9. View Recent Cases")
+    print("10. Return to Main Menu")
     choice = input("Select an option: ").strip()
     if choice == "1":
         real_time_monitoring()
@@ -742,6 +756,8 @@ def advanced_modules_menu():
     elif choice == "8":
         anomaly_detection()
     elif choice == "9":
+        display_recent_cases()
+    elif choice == "10":
         return
     else:
         print("[ERROR] Invalid choice.")
@@ -750,6 +766,9 @@ def advanced_modules_menu():
 # MAIN MENU
 # ---------------------------
 def main_menu():
+    initialize_database()
+    start_background_thread()
+    
     if not os.path.exists(REPORT_DIR):
         os.makedirs(REPORT_DIR)
 
@@ -761,7 +780,8 @@ def main_menu():
         print("2. Malware Analysis")
         print("3. Interactive DeepSeek AI Chat")
         print("4. Advanced Modules")
-        print("5. Exit")
+        print("5. View Recent Cases")
+        print("6. Exit")
         choice = input("Select an option: ").strip()
 
         if choice == "1":
@@ -773,10 +793,23 @@ def main_menu():
         elif choice == "4":
             advanced_modules_menu()
         elif choice == "5":
+            display_recent_cases()
+        elif choice == "6":
             print("Exiting...")
             break
         else:
             print("[ERROR] Invalid choice, please try again.")
+
+FUNCTION_MAP = {
+    "calculate_file_hash": calculate_file_hash,
+    "yara_scan": yara_scan,
+    "extract_strings": extract_strings,
+    "analyze_file_metadata": analyze_file_metadata,
+    "virus_total_check": virus_total_check,
+    "detect_packed_exe": detect_packed_exe,
+    "capture_screenshot": capture_screenshot,
+    "execute_command": execute_command,
+}
 
 if __name__ == "__main__":
     main_menu()
